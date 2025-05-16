@@ -1,0 +1,20 @@
+[package]
+name = "open-sesame"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.38", features = ["derive"] }
+color-eyre = "0.6.4"
+futures = "0.3.31"
+matrix-sdk = { version = "0.11.0", features = ["e2e-encryption"] }
+matrixbot-ezlogin = "0.2.2"
+percent-encoding = "2.3.1"
+tokio = { version = "1.45.0", features = ["full"] }
+toml = "0.8.22"
+tracing = "0.1.41"
+tracing-error = "0.2.1"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[features]
+bundled-sqlite = ["matrix-sdk/bundled-sqlite"]
