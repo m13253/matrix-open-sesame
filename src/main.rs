@@ -360,6 +360,15 @@ async fn on_message(
             event.sender,
             target_room.room_id()
         );
+        send_reply(
+            room.clone(),
+            thread.as_ref(),
+            event.event_id.clone(),
+            format!("I’m inviting you to <{link}>, one second please…"),
+            Some(format!(
+                "I’m inviting you to <a href=\"{link}\">{link}</a>, one second please…",
+            )),
+        );
         let invite_is_successful = match target_room.invite_user_by_id(&event.sender).await {
             Ok(_) => {
                 info!(
@@ -385,9 +394,9 @@ async fn on_message(
                 room.clone(),
                 thread.as_ref(),
                 event.event_id,
-                format!("I’ve invited you to <{link}>. Welcome!"),
+                format!("Welcome to <{link}>!"),
                 Some(format!(
-                    "I’ve invited you to <a href=\"{link}\">{link}</a>. Welcome!",
+                    "Welcome to <a href=\"{link}\">{link}</a>!",
                 )),
             );
         } else {
@@ -395,9 +404,9 @@ async fn on_message(
                 room.clone(),
                 thread.as_ref(),
                 event.event_id,
-                format!("I’m trying to invite you to <{link}>, but something went wrong.",),
+                format!("I’ve tried to invite you to <{link}>, but something went wrong.",),
                 Some(format!(
-                    "I’m trying to invite you to <a href=\"{link}\">{link}</a>, but something went wrong.",
+                    "I’ve tried to invite you to <a href=\"{link}\">{link}</a>, but something went wrong.",
                 )),
             );
         }
@@ -508,6 +517,9 @@ async fn on_leave(event: SyncRoomMemberEvent, room: Room) {
 
     match room.state() {
         RoomState::Joined => {
+            if let Err(err) = room.sync_members().await {
+                warn!("Failed to sync members of {}: {:?}", room.room_id(), err);
+            }
             // Only I remain in the room.
             if room.joined_members_count() <= 1 {
                 tokio::spawn(async move {
