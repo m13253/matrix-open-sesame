@@ -172,7 +172,7 @@ fn send_reply(
     event_id: OwnedEventId,
     text: String,
     html: Option<String>,
-) {
+) -> impl Future<Output = ()> + use<> {
     let mut reply = match html {
         Some(html) => RoomMessageEventContent::notice_html(text, html),
         None => RoomMessageEventContent::notice_plain(text),
@@ -188,13 +188,13 @@ fn send_reply(
         }),
     };
 
-    tokio::spawn(async move {
+    async move {
         info!("Sending a reply to {}.", event_id);
         match room.send(reply).await {
             Ok(_) => info!("Sent a reply to {}.", event_id),
             Err(err) => error!("Failed to send a reply to {}: {:?}", event_id, err),
         }
-    });
+    }
 }
 
 #[instrument(skip_all)]
@@ -266,13 +266,13 @@ async fn on_message(
         passbook.get(passphrase)
     };
     let Some(target_room_id) = target_room_id else {
-        send_reply(
+        tokio::spawn(send_reply(
             room,
             thread,
             event.event_id,
             "Incorrect passphrase, please try again.".to_owned(),
             None,
-        );
+        ));
         return;
     };
     let target_room = 'L2: {
@@ -291,7 +291,7 @@ async fn on_message(
     };
     let Some(target_room) = target_room else {
         let link = matrix_to_matrix_to_permalink_with_fallback(None, target_room_id).await;
-        send_reply(
+        tokio::spawn(send_reply(
             room,
             thread,
             event.event_id,
@@ -299,7 +299,7 @@ async fn on_message(
             Some(format!(
                 "I’m trying to invite you to <a href=\"{link}\">{link}</a>, but something went wrong.",
             )),
-        );
+        ));
         return;
     };
 
@@ -368,7 +368,8 @@ async fn on_message(
             Some(format!(
                 "I’m inviting you to <a href=\"{link}\">{link}</a>, one second please…",
             )),
-        );
+        )
+        .await;
         let invite_is_successful = match target_room.invite_user_by_id(&event.sender).await {
             Ok(_) => {
                 info!(
@@ -395,10 +396,9 @@ async fn on_message(
                 thread.as_ref(),
                 event.event_id,
                 format!("Welcome to <{link}>!"),
-                Some(format!(
-                    "Welcome to <a href=\"{link}\">{link}</a>!",
-                )),
-            );
+                Some(format!("Welcome to <a href=\"{link}\">{link}</a>!",)),
+            )
+            .await;
         } else {
             send_reply(
                 room.clone(),
@@ -408,7 +408,7 @@ async fn on_message(
                 Some(format!(
                     "I’ve tried to invite you to <a href=\"{link}\">{link}</a>, but something went wrong.",
                 )),
-            );
+            ).await;
         }
     });
 }
@@ -436,13 +436,13 @@ async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client)
         Some(Relation::Thread(ref thread)) => Some(thread),
         _ => None,
     };
-    send_reply(
+    tokio::spawn(send_reply(
         room,
         thread,
         event.event_id,
         "Incorrect passphrase, please try again.".to_owned(),
         None,
-    );
+    ));
 }
 
 // The SDK documentation said nothing about how to catch unable-to-decrypt (UTD) events.
