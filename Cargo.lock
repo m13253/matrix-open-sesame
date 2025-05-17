@@ -2016,9 +2016,9 @@ dependencies = [
 
 [[package]]
 name = "matrixbot-ezlogin"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9604a0f0ea731d9683f01894c9d2b9505218d322748db0865e526daff692de84"
+checksum = "da34370a535b544abe1d4dac11d1d031a346a5fa0f0925113063460e4f6a31b2"
 dependencies = [
  "color-eyre",
  "matrix-sdk",
