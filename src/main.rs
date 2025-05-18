@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
             let mut filter = EnvFilter::new(concat!(
                 "warn,",
                 env!("CARGO_CRATE_NAME"),
-                "=debug,matrixbot_ezlogin=debug"
+                "=debug,matrixbot_ezlogin=info"
             ));
             if let Some(env) = std::env::var_os(EnvFilter::DEFAULT_ENV) {
                 for segment in env.to_string_lossy().split(',') {
