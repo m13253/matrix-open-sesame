@@ -82,7 +82,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(tracing_error::ErrorLayer::default())
         .with({
-            let mut filter = EnvFilter::new("warn,open_sesame=debug,matrixbot_ezlogin=info");
+            let mut filter = EnvFilter::new(concat!(
+                "warn,",
+                env!("CARGO_CRATE_NAME"),
+                "=debug,matrixbot_ezlogin=debug"
+            ));
             if let Some(env) = std::env::var_os(EnvFilter::DEFAULT_ENV) {
                 for segment in env.to_string_lossy().split(',') {
                     if let Ok(directive) = segment.parse() {
@@ -248,8 +252,11 @@ async fn on_message(
         info!("Ignoring: Current room state is {:?}.", room.state());
         return;
     }
+    if let Some(Relation::Replacement(_)) = event.content.relates_to {
+        info!("Ignoring: This event is an edit operation.");
+        return;
+    }
     let thread = match event.content.relates_to {
-        Some(Relation::Replacement(_)) => return,
         Some(Relation::Thread(ref thread)) => Some(thread),
         _ => None,
     };
@@ -413,8 +420,6 @@ async fn on_message(
     });
 }
 
-// Sticker messages aren't of m.room.message types.
-// Basically it means you need to write the logic again with a different type.
 // https://spec.matrix.org/v1.14/client-server-api/#sticker-messages
 #[instrument(skip_all)]
 async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client) {
@@ -431,8 +436,11 @@ async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client)
         info!("Ignoring: Current room state is {:?}.", room.state());
         return;
     }
+    if let Some(Relation::Replacement(_)) = event.content.relates_to {
+        info!("Ignoring: This event is an edit operation.");
+        return;
+    }
     let thread = match event.content.relates_to {
-        Some(Relation::Replacement(_)) => return,
         Some(Relation::Thread(ref thread)) => Some(thread),
         _ => None,
     };
@@ -445,13 +453,11 @@ async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client)
     ));
 }
 
-// The SDK documentation said nothing about how to catch unable-to-decrypt (UTD) events.
-// But it seems this handler can capture them.
+// https://spec.matrix.org/v1.14/client-server-api/#mroomencrypted
 #[instrument(skip_all)]
 async fn on_utd(event: SyncRoomEncryptedEvent, room: Room) {
     info!("room = {}, event = {:?}", room.room_id(), event);
     error!("Unable to decrypt message {}.", event.event_id());
-    set_read_marker(room, event.event_id().to_owned());
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#mroommember
@@ -501,10 +507,6 @@ async fn on_invite(event: StrippedRoomMemberEvent, room: Room, client: Client) {
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#mroommember
-// Each m.room.member event occurs twice in SyncResponse, one as state event, another as timeline event.
-// As of matrix_sdk-0.11.0, if our handler matches SyncRoomMemberEvent, the event handler will actually be called twice.
-// (Reference: matrix_sdk::Client::call_sync_response_handlers, https://github.com/matrix-org/matrix-rust-sdk/pull/4947)
-// Thankfully, leaving a room twice does not return errors.
 #[instrument(skip_all)]
 async fn on_leave(event: SyncRoomMemberEvent, room: Room) {
     if !matches!(
