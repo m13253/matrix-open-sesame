@@ -381,9 +381,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.22"
+version = "1.2.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32db95edf998450acc7881c932f94cd9b05c87b4b2599e8bab064753da4acfd1"
+checksum = "5f4ac86a9e5bc1e2b3449ab9d7d3a6a405e3d1bb28d7b9be8614f55846ae3766"
 dependencies = [
  "shlex",
 ]
@@ -2016,9 +2016,9 @@ dependencies = [
 
 [[package]]
 name = "matrixbot-ezlogin"
-version = "0.2.4"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13794f4f5be79eda5d7eb174a5de2b373e2e21c108dc544884f806e3f9aac5fc"
+checksum = "ab7e9f5f1b2d3117f64d4306f3a7fdfc2f447da0febcb7909b1cd20cc9974a2f"
 dependencies = [
  "color-eyre",
  "matrix-sdk",
