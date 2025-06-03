@@ -5,10 +5,10 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
-color-eyre = "0.6.4"
+color-eyre = "0.6.5"
 futures = "0.3.31"
-matrix-sdk = { version = "0.11.0", features = ["e2e-encryption"] }
-matrixbot-ezlogin = "0.2.7"
+matrix-sdk = { version = "0.11.0", default-features = false, features = ["automatic-room-key-forwarding", "e2e-encryption", "sqlite"] }
+matrixbot-ezlogin = { version = "0.3.1", default-features = false }
 percent-encoding = "2.3.1"
 tokio = { version = "1.45.1", features = ["full"] }
 toml = "0.8.22"
@@ -17,4 +17,7 @@ tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 [features]
+default = ["native-tls"]
 bundled-sqlite = ["matrix-sdk/bundled-sqlite", "matrixbot-ezlogin/bundled-sqlite"]
+native-tls = ["matrix-sdk/native-tls", "matrixbot-ezlogin/native-tls"]
+rustls-tls = ["matrix-sdk/rustls-tls", "matrixbot-ezlogin/rustls-tls"]
