@@ -2043,9 +2043,9 @@ dependencies = [
 
 [[package]]
 name = "matrixbot-ezlogin"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1bb7f21ed5b1ace5aa00b0ce01d9f8e8f5590e632ba919b72e0f8bdd73d36ac"
+checksum = "a440332fc862f9c762e69d16202227536af56131784169c75ae1be9045ac87bf"
 dependencies = [
  "async-stream",
  "eyre",
@@ -2711,6 +2711,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls",
+ "tokio-socks",
  "tokio-util",
  "tower",
  "tower-http",
@@ -3471,6 +3472,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e727b36a1a0e8b74c376ac2211e40c2c8af09fb4013c60d910495810f008e9b"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-socks"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d4770b8024672c1101b3f6733eab95b18007dbe0847a8afe341fcf79e06043f"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
