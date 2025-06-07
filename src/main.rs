@@ -23,6 +23,8 @@ use matrix_sdk::{Client, Room, RoomState};
 use tracing::{debug, error, info, instrument, warn};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
+mod html_escape;
+
 #[derive(clap::Parser)]
 struct Args {
     #[clap(subcommand)]
@@ -217,31 +219,27 @@ fn send_reply(
 }
 
 #[instrument(skip_all)]
-async fn matrix_to_matrix_to_permalink_with_fallback(
-    room: Option<&Room>,
-    fallback_room_id: &str,
-) -> String {
-    const ESCAPE_SET_1: percent_encoding::AsciiSet = percent_encoding::CONTROLS.add(b' ').add(b'"');
-    const ESCAPE_SET_2: percent_encoding::AsciiSet = ESCAPE_SET_1
-        .add(b'%')
-        .add(b'&')
-        .add(b'+')
-        .add(b'/')
-        .add(b'<')
-        .add(b'>')
-        .add(b'?');
+async fn matrix_to_permalink_with_fallback(room: Option<&Room>, fallback_room_id: &str) -> String {
     OptionFuture::from(room.map(Room::matrix_to_permalink))
         .await
-        .and_then(|permalink| {
-            Some(
-                percent_encoding::utf8_percent_encode(&permalink.ok()?.to_string(), &ESCAPE_SET_1)
-                    .to_string(),
-            )
-        })
+        .transpose()
+        .unwrap_or_default()
+        .map(|permalink| permalink.to_string())
         .unwrap_or_else(|| {
+            const ESCAPE_SET: percent_encoding::AsciiSet = percent_encoding::CONTROLS
+                .add(b' ')
+                .add(b'"')
+                .add(b'#')
+                .add(b'<')
+                .add(b'>')
+                .add(b'?')
+                .add(b'`')
+                .add(b'{')
+                .add(b'}')
+                .add(b'/');
             format!(
                 "https://matrix.to/#/{}",
-                percent_encoding::utf8_percent_encode(fallback_room_id, &ESCAPE_SET_2)
+                percent_encoding::utf8_percent_encode(fallback_room_id, &ESCAPE_SET)
             )
         })
 }
@@ -319,14 +317,16 @@ async fn on_message(
         Some(room)
     };
     let Some(target_room) = target_room else {
-        let link = matrix_to_matrix_to_permalink_with_fallback(None, target_room_id).await;
+        let link = matrix_to_permalink_with_fallback(None, target_room_id).await;
         tokio::spawn(send_reply(
             room,
             thread,
             event.event_id,
             format!("I’m trying to invite you to <{link}>, but something went wrong."),
             Some(format!(
-                "I’m trying to invite you to <a href=\"{link}\">{link}</a>, but something went wrong.",
+                "I’m trying to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
+                html_escape::attr(&link),
+                html_escape::text(&link)
             )),
         ));
         return;
@@ -335,11 +335,9 @@ async fn on_message(
     let thread = thread.cloned();
     tokio::spawn(async move {
         info!("Generating room link.");
-        let link = matrix_to_matrix_to_permalink_with_fallback(
-            Some(&target_room),
-            target_room.room_id().as_str(),
-        )
-        .await;
+        let link =
+            matrix_to_permalink_with_fallback(Some(&target_room), target_room.room_id().as_str())
+                .await;
         info!("Room link: {link}");
 
         info!(
@@ -395,7 +393,9 @@ async fn on_message(
             event.event_id.clone(),
             format!("I’m inviting you to <{link}>, one second please…"),
             Some(format!(
-                "I’m inviting you to <a href=\"{link}\">{link}</a>, one second please…",
+                "I’m inviting you to <a href=\"{}\">{}</a>, one second please…",
+                html_escape::attr(&link),
+                html_escape::text(&link)
             )),
         )
         .await;
@@ -425,7 +425,11 @@ async fn on_message(
                 thread.as_ref(),
                 event.event_id,
                 format!("Welcome to <{link}>!"),
-                Some(format!("Welcome to <a href=\"{link}\">{link}</a>!",)),
+                Some(format!(
+                    "Welcome to <a href=\"{}\">{}</a>!",
+                    html_escape::attr(&link),
+                    html_escape::text(&link)
+                )),
             )
             .await;
         } else {
@@ -435,9 +439,12 @@ async fn on_message(
                 event.event_id,
                 format!("I’ve tried to invite you to <{link}>, but something went wrong.",),
                 Some(format!(
-                    "I’ve tried to invite you to <a href=\"{link}\">{link}</a>, but something went wrong.",
+                    "I’ve tried to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
+                    html_escape::attr(&link),
+                    html_escape::text(&link)
                 )),
-            ).await;
+            )
+            .await;
         }
     });
 }
