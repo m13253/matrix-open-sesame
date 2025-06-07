@@ -14,7 +14,7 @@ use matrix_sdk::ruma::events::room::member::{
     MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent,
 };
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContentWithoutRelation,
     TextMessageEventContent,
 };
 use matrix_sdk::ruma::events::sticker::OriginalSyncStickerEvent;
@@ -191,12 +191,8 @@ fn send_reply(
     text: String,
     html: Option<String>,
 ) -> impl Future<Output = ()> + use<> {
-    let mut reply = match html {
-        Some(html) => RoomMessageEventContent::notice_html(text, html),
-        None => RoomMessageEventContent::notice_plain(text),
-    };
     // We should use make_reply_to, but it embeds the original message body, which I don't want
-    reply.relates_to = match thread_id {
+    let relates_to = match thread_id {
         Some(thread) => Some(Relation::Thread(Thread::reply(
             thread.event_id.clone(),
             event_id.clone(),
@@ -205,6 +201,11 @@ fn send_reply(
             in_reply_to: InReplyTo::new(event_id.clone()),
         }),
     };
+    let reply = match html {
+        Some(html) => RoomMessageEventContentWithoutRelation::notice_html(text, html),
+        None => RoomMessageEventContentWithoutRelation::notice_plain(text),
+    }
+    .with_relation(relates_to);
 
     async move {
         info!("Sending a reply to {}.", event_id);
