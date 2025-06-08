@@ -493,7 +493,7 @@ async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client)
 #[instrument(skip_all)]
 async fn on_utd(event: OriginalSyncRoomEncryptedEvent, room: Room) {
     debug!("room = {}, event = {:?}", room.room_id(), event);
-    error!("Unable to decrypt event {}.", event.event_id());
+    error!("Unable to decrypt event {}.", event.event_id);
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#mroommember
