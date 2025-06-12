@@ -453,15 +453,27 @@ async fn process_invite(
                         &config,
                         client.clone(),
                         format!(
-                            "Failed to invite <{}> to room <{}>: {}",
-                            sender, target_room_id, err_str
+                            "Failed to invite <{}> to room <{}>{}: {}",
+                            sender,
+                            target_room_id,
+                            if invite_failure_is_normal {
+                                " (this is normal)"
+                            } else {
+                                ""
+                            },
+                            err_str
                         ),
                         Some(format!(
-                            "Failed to invite <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>: {}",
+                            "Failed to invite <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>{}:<blockquote><pre>{}</pre></blockquote>",
                             html_escape::attr(&sender_link),
                             html_escape::text(sender.as_str()),
                             html_escape::attr(&target_room_link_log.read().await),
                             html_escape::text(target_room_id.as_str()),
+                            if invite_failure_is_normal {
+                                " (this is normal)"
+                            } else {
+                                ""
+                            },
                             html_escape::text(&err_str)
                         )),
                     ));
@@ -480,8 +492,8 @@ async fn process_invite(
                     format!("Welcome to <{}>!", target_room_id),
                     Some(format!(
                         "Welcome to <a href=\"{}\">{}</a>!",
-                        html_escape::attr(target_room_id.as_str()),
-                        html_escape::text(&target_room_link_join.read().await)
+                        html_escape::attr(&target_room_link_join.read().await),
+                        html_escape::text(target_room_id.as_str())
                     )),
                 )
                 .await;
@@ -496,8 +508,8 @@ async fn process_invite(
                     ),
                     Some(format!(
                         "I’ve tried to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
-                        html_escape::attr(target_room_id.as_str()),
-                        html_escape::text(&target_room_link_join.read().await)
+                        html_escape::attr(&target_room_link_join.read().await),
+                        html_escape::text(target_room_id.as_str())
                     )),
                 )
                 .await;
