@@ -294,9 +294,7 @@ async fn process_invite(
         ));
         return;
     };
-
-    let target_room_link_log = target_room_id.matrix_uri(false).to_string();
-    let target_room_link_join = target_room_id.matrix_uri(true).to_string();
+    let target_room_link = target_room_id.matrix_to_uri().to_string();
 
     let Some(target_room) = client.get_room(&target_room_id) else {
         error!("Cannot find the target room {}.", target_room_id);
@@ -311,7 +309,7 @@ async fn process_invite(
                 "Failed to invite <a href=\"{}\">{}</a> to <a href=\"{}\">{}</a>: Cannot find the target room.",
                 html_escape::attr(&sender_link),
                 html_escape::text(sender.as_str()),
-                html_escape::attr(&target_room_link_log),
+                html_escape::attr(&target_room_link),
                 html_escape::text(target_room_id.as_str())
             )),
         ));
@@ -325,15 +323,14 @@ async fn process_invite(
             ),
             Some(format!(
                 "I’m trying to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
-                html_escape::attr(&target_room_link_join),
+                html_escape::attr(&target_room_link),
                 html_escape::text(target_room_id.as_str())
             )),
         ));
         return;
     };
 
-    let target_room_link_log = Arc::new(RwLock::new(target_room_link_log));
-    let target_room_link_join = Arc::new(RwLock::new(target_room_link_join));
+    let target_room_link = Arc::new(RwLock::new(target_room_link));
     let cancel_token = CancellationToken::new();
 
     // Spawn a task that fires after 5 seconds, informing the user of a potential delay.
@@ -343,7 +340,7 @@ async fn process_invite(
         let thread_id = thread_id.clone();
         let event_id = event_id.clone();
         let target_room_id = target_room_id.clone();
-        let target_room_link_join = target_room_link_join.clone();
+        let target_room_link = target_room_link.clone();
         async move {
             select! {
                 _ = cancel_token.cancelled() => return,
@@ -360,7 +357,7 @@ async fn process_invite(
                 ),
                 Some(format!(
                     "Inviting to <a href=\"{}\">{}</a>. It make take 0–15 minutes…",
-                    html_escape::attr(&target_room_link_join.read().await),
+                    html_escape::attr(&target_room_link.read().await),
                     html_escape::text(target_room_id.as_str())
                 )),
             )
@@ -405,10 +402,7 @@ async fn process_invite(
             };
 
             let target_room_route = target_room.route().await.unwrap_or_default();
-            *target_room_link_log.write().await = target_room_id
-                .matrix_uri_via(target_room_route.clone(), false)
-                .to_string();
-            *target_room_link_join.write().await = target_room_id.matrix_uri_via(target_room_route, true).to_string();
+            *target_room_link.write().await = target_room_id.matrix_to_uri_via(target_room_route).to_string();
 
             info!("Inviting {} to room {}.", sender, target_room_id);
             send_log(
@@ -419,7 +413,7 @@ async fn process_invite(
                     "Inviting <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>…",
                     html_escape::attr(&sender_link),
                     html_escape::text(sender.as_str()),
-                    html_escape::attr(&target_room_link_log.read().await),
+                    html_escape::attr(&target_room_link.read().await),
                     html_escape::text(target_room_id.as_str())
                 )),
             ).await;
@@ -435,7 +429,7 @@ async fn process_invite(
                             "Invited <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>.",
                             html_escape::attr(&sender_link),
                             html_escape::text(sender.as_str()),
-                            html_escape::attr(&target_room_link_log.read().await),
+                            html_escape::attr(&target_room_link.read().await),
                             html_escape::text(target_room_id.as_str())
                         )),
                     ));
@@ -467,7 +461,7 @@ async fn process_invite(
                             "Failed to invite <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>{}:<blockquote><pre>{}</pre></blockquote>",
                             html_escape::attr(&sender_link),
                             html_escape::text(sender.as_str()),
-                            html_escape::attr(&target_room_link_log.read().await),
+                            html_escape::attr(&target_room_link.read().await),
                             html_escape::text(target_room_id.as_str()),
                             if invite_failure_is_normal {
                                 " (this is normal)"
@@ -492,7 +486,7 @@ async fn process_invite(
                     format!("Welcome to <{}>!", target_room_id),
                     Some(format!(
                         "Welcome to <a href=\"{}\">{}</a>!",
-                        html_escape::attr(&target_room_link_join.read().await),
+                        html_escape::attr(&target_room_link.read().await),
                         html_escape::text(target_room_id.as_str())
                     )),
                 )
@@ -508,7 +502,7 @@ async fn process_invite(
                     ),
                     Some(format!(
                         "I’ve tried to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
-                        html_escape::attr(&target_room_link_join.read().await),
+                        html_escape::attr(&target_room_link.read().await),
                         html_escape::text(target_room_id.as_str())
                     )),
                 )
