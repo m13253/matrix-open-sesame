@@ -56,11 +56,11 @@ enum Command {
     #[clap(about = "Run the bot")]
     Run {
         #[clap(
-            long = "conf",
+            long = "config",
             value_name = "PATH",
             help = "Path to the configuration file"
         )]
-        conf_path: PathBuf,
+        config_path: PathBuf,
         #[clap(
             long = "data",
             value_name = "PATH",
@@ -113,17 +113,17 @@ async fn main() -> Result<()> {
             device_name,
         } => drop(matrixbot_ezlogin::setup_interactive(&data_dir, &device_name).await?),
         Command::Run {
-            conf_path,
+            config_path,
             data_dir,
-        } => run(&conf_path, &data_dir).await?,
+        } => run(&config_path, &data_dir).await?,
         Command::Logout { data_dir } => matrixbot_ezlogin::logout(&data_dir).await?,
     };
     Ok(())
 }
 
-async fn run(conf_path: &Path, data_dir: &Path) -> Result<()> {
+async fn run(config_path: &Path, data_dir: &Path) -> Result<()> {
     info!("Loading configuration file");
-    let config = config::Config::new(conf_path).await?;
+    let config = config::Config::new(config_path).await?;
 
     let (client, sync_helper) = matrixbot_ezlogin::login(data_dir).await?;
 
