@@ -1,28 +1,32 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use color_eyre::eyre::Result;
-use futures::future::OptionFuture;
+use eyre::Result;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::event_handler::Ctx;
 use matrix_sdk::room::Receipts;
 use matrix_sdk::ruma::api::client::filter::FilterDefinition;
+use matrix_sdk::ruma::events::Mentions;
 use matrix_sdk::ruma::events::relation::{InReplyTo, Thread};
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::member::{
     MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent,
 };
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContentWithoutRelation,
-    TextMessageEventContent,
+    OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+    RoomMessageEventContentWithoutRelation,
 };
 use matrix_sdk::ruma::events::sticker::OriginalSyncStickerEvent;
-use matrix_sdk::ruma::{OwnedEventId, RoomId};
+use matrix_sdk::ruma::{OwnedEventId, OwnedUserId};
 use matrix_sdk::{Client, Room, RoomState};
-use tracing::{debug, error, info, instrument, warn};
+use tokio::select;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, debug, error, info, instrument, warn};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
+mod config;
 mod html_escape;
 
 #[derive(clap::Parser)]
@@ -44,7 +48,7 @@ enum Command {
         #[clap(
             long,
             value_name = "DEVICE_NAME",
-            default_value = "matrixbot-ezlogin/open-sesame",
+            default_value = concat!("matrixbot-ezlogin/", env!("CARGO_BIN_NAME")),
             help = "Device name to use for this session"
         )]
         device_name: String,
@@ -52,17 +56,17 @@ enum Command {
     #[clap(about = "Run the bot")]
     Run {
         #[clap(
+            long = "conf",
+            value_name = "PATH",
+            help = "Path to the configuration file"
+        )]
+        conf_path: PathBuf,
+        #[clap(
             long = "data",
             value_name = "PATH",
             help = "Path to an existing Matrix session"
         )]
         data_dir: PathBuf,
-        #[clap(
-            long = "passbook",
-            value_name = "PATH",
-            help = "Path to the passphrase file"
-        )]
-        passbook_path: PathBuf,
     },
     #[clap(about = "Log out of the Matrix session, and delete the state database")]
     Logout {
@@ -74,8 +78,6 @@ enum Command {
         data_dir: PathBuf,
     },
 }
-
-type Passbook = HashMap<String, String>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -111,21 +113,22 @@ async fn main() -> Result<()> {
             device_name,
         } => drop(matrixbot_ezlogin::setup_interactive(&data_dir, &device_name).await?),
         Command::Run {
+            conf_path,
             data_dir,
-            passbook_path,
-        } => run(&data_dir, &passbook_path).await?,
+        } => run(&conf_path, &data_dir).await?,
         Command::Logout { data_dir } => matrixbot_ezlogin::logout(&data_dir).await?,
     };
     Ok(())
 }
 
-async fn run(data_dir: &Path, passbook_path: &Path) -> Result<()> {
-    info!("Loading passphrase file");
-    let passbook = toml::from_str::<Passbook>(&tokio::fs::read_to_string(passbook_path).await?)?;
+async fn run(conf_path: &Path, data_dir: &Path) -> Result<()> {
+    info!("Loading configuration file");
+    let config = config::Config::new(conf_path).await?;
 
     let (client, sync_helper) = matrixbot_ezlogin::login(data_dir).await?;
 
     // We don't ignore joining and leaving events happened during downtime.
+    client.add_event_handler_context(config);
     client.add_event_handler(on_invite);
     client.add_event_handler(on_leave);
 
@@ -141,22 +144,24 @@ async fn run(data_dir: &Path, passbook_path: &Path) -> Result<()> {
         .sync_once(&client, sync_settings.clone())
         .await?;
 
-    client.add_event_handler_context(passbook);
     client.add_event_handler(on_message);
     client.add_event_handler(on_sticker);
     client.add_event_handler(on_utd);
 
     // Forget rooms that we already left
     let left_rooms = client.left_rooms();
-    tokio::spawn(async move {
-        for room in left_rooms {
-            info!("Forgetting room {}.", room.room_id());
-            match room.forget().await {
-                Ok(_) => info!("Forgot room {}.", room.room_id()),
-                Err(err) => error!("Failed to forget room {}: {:?}", room.room_id(), err),
+    tokio::spawn(
+        async move {
+            for room in left_rooms {
+                info!("Forgetting room {}.", room.room_id());
+                match room.forget().await {
+                    Ok(_) => info!("Forgot room {}.", room.room_id()),
+                    Err(err) => error!("Failed to forget room {}: {:?}", room.room_id(), err),
+                }
             }
         }
-    });
+        .in_current_span(),
+    );
 
     info!("Starting sync.");
     sync_helper.sync(&client, sync_settings).await?;
@@ -165,40 +170,72 @@ async fn run(data_dir: &Path, passbook_path: &Path) -> Result<()> {
 }
 
 #[instrument(skip_all)]
-fn set_read_marker(room: Room, event_id: OwnedEventId) {
-    tokio::spawn(async move {
-        if let Err(err) = room
-            .send_multiple_receipts(
-                Receipts::new()
-                    .fully_read_marker(event_id.clone())
-                    .public_read_receipt(event_id.clone()),
+async fn set_read_marker(room: Room, event_id: OwnedEventId) {
+    if let Err(err) = room
+        .send_multiple_receipts(
+            Receipts::new()
+                .fully_read_marker(event_id.clone())
+                .public_read_receipt(event_id.clone()),
+        )
+        .await
+    {
+        error!(
+            "Failed to set the read marker of room {} to event {}: {:?}",
+            room.room_id(),
+            event_id,
+            err
+        );
+    }
+}
+
+#[instrument(skip_all)]
+fn send_log(
+    config: &config::Config,
+    client: Client,
+    text: String,
+    html: Option<String>,
+) -> impl Future<Output = ()> + use<> {
+    let maybe_reply = config
+        .log_room
+        .as_ref()
+        .and_then(|log_room| {
+            client.get_room(&log_room).or_else(|| {
+                error!("Cannot find the log room {}.", log_room);
+                None
+            })
+        })
+        .map(|room| {
+            (
+                room,
+                match html {
+                    Some(html) => RoomMessageEventContent::notice_html(text, html),
+                    None => RoomMessageEventContent::notice_plain(text),
+                }
+                .add_mentions(Mentions::new()),
             )
-            .await
-        {
-            error!(
-                "Failed to set the read marker of room {} to event {}: {:?}",
-                room.room_id(),
-                event_id,
-                err
-            );
+        });
+    async move {
+        let Some((room, reply)) = maybe_reply else {
+            return;
+        };
+        if let Err(err) = room.send(reply).await {
+            error!("Failed to send log to {}: {:?}", room.room_id(), err);
         }
-    });
+    }
+    .in_current_span()
 }
 
 #[instrument(skip_all)]
 fn send_reply(
     room: Room,
-    thread_id: Option<&Thread>,
+    thread_id: Option<OwnedEventId>,
     event_id: OwnedEventId,
     text: String,
     html: Option<String>,
 ) -> impl Future<Output = ()> + use<> {
     // We should use make_reply_to, but it embeds the original message body, which I don't want
     let relates_to = match thread_id {
-        Some(thread) => Some(Relation::Thread(Thread::reply(
-            thread.event_id.clone(),
-            event_id.clone(),
-        ))),
+        Some(thread) => Some(Relation::Thread(Thread::reply(thread, event_id.clone()))),
         _ => Some(Relation::Reply {
             in_reply_to: InReplyTo::new(event_id.clone()),
         }),
@@ -207,41 +244,267 @@ fn send_reply(
         Some(html) => RoomMessageEventContentWithoutRelation::notice_html(text, html),
         None => RoomMessageEventContentWithoutRelation::notice_plain(text),
     }
+    .add_mentions(Mentions::new())
     .with_relation(relates_to);
 
     async move {
-        info!("Sending a reply to {}.", event_id);
-        match room.send(reply).await {
-            Ok(_) => info!("Sent a reply to {}.", event_id),
-            Err(err) => error!("Failed to send a reply to {}: {:?}", event_id, err),
+        if let Err(err) = room.send(reply).await {
+            error!("Failed to send a reply to {}: {:?}", event_id, err);
         }
     }
+    .in_current_span()
 }
 
 #[instrument(skip_all)]
-async fn matrix_to_permalink_with_fallback(room: Option<&Room>, fallback_room_id: &str) -> String {
-    OptionFuture::from(room.map(Room::matrix_to_permalink))
-        .await
-        .transpose()
-        .unwrap_or_default()
-        .map(|permalink| permalink.to_string())
-        .unwrap_or_else(|| {
-            const ESCAPE_SET: percent_encoding::AsciiSet = percent_encoding::CONTROLS
-                .add(b' ')
-                .add(b'"')
-                .add(b'#')
-                .add(b'<')
-                .add(b'>')
-                .add(b'?')
-                .add(b'`')
-                .add(b'{')
-                .add(b'}')
-                .add(b'/');
+async fn process_invite(
+    client: Client,
+    room: Room,
+    thread_id: Option<OwnedEventId>,
+    event_id: OwnedEventId,
+    sender: OwnedUserId,
+    passphrase: &str,
+    config: Arc<config::Config>,
+) {
+    let sender_link = sender.matrix_uri(false).to_string();
+    let target_room_id = if passphrase.is_empty() {
+        None
+    } else {
+        config.passphrases.get(passphrase).cloned()
+    };
+    let Some(target_room_id) = target_room_id else {
+        tokio::spawn(send_log(
+            &config,
+            client.clone(),
             format!(
-                "https://matrix.to/#/{}",
-                percent_encoding::utf8_percent_encode(fallback_room_id, &ESCAPE_SET)
+                "<{}> didn‘t pass authentication: Incorrect passphrase.",
+                sender
+            ),
+            Some(format!(
+                "<a href=\"{}\">{}</a> didn‘t pass authentication: Incorrect passphrase.",
+                html_escape::attr(&sender_link),
+                html_escape::text(sender.as_str())
+            )),
+        ));
+        tokio::spawn(send_reply(
+            room,
+            thread_id,
+            event_id,
+            "Incorrect passphrase, please try again.".to_owned(),
+            None,
+        ));
+        return;
+    };
+
+    let target_room_link_log = target_room_id.matrix_uri(false).to_string();
+    let target_room_link_join = target_room_id.matrix_uri(true).to_string();
+
+    let Some(target_room) = client.get_room(&target_room_id) else {
+        error!("Cannot find the target room {}.", target_room_id);
+        tokio::spawn(send_log(
+            &config,
+            client.clone(),
+            format!(
+                "Failed to invite <{}> to <{}>: Cannot find the target room.",
+                sender, target_room_id
+            ),
+            Some(format!(
+                "Failed to invite <a href=\"{}\">{}</a> to <a href=\"{}\">{}</a>: Cannot find the target room.",
+                html_escape::attr(&sender_link),
+                html_escape::text(sender.as_str()),
+                html_escape::attr(&target_room_link_log),
+                html_escape::text(target_room_id.as_str())
+            )),
+        ));
+        tokio::spawn(send_reply(
+            room,
+            thread_id,
+            event_id,
+            format!(
+                "I’m trying to invite you to <{}>, but something went wrong.",
+                target_room_id
+            ),
+            Some(format!(
+                "I’m trying to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
+                html_escape::attr(&target_room_link_join),
+                html_escape::text(target_room_id.as_str())
+            )),
+        ));
+        return;
+    };
+
+    let target_room_link_log = Arc::new(RwLock::new(target_room_link_log));
+    let target_room_link_join = Arc::new(RwLock::new(target_room_link_join));
+    let cancel_token = CancellationToken::new();
+
+    // Spawn a task that fires after 5 seconds, informing the user of a potential delay.
+    let delay_notification = tokio::spawn({
+        let cancel_token = cancel_token.clone();
+        let room = room.clone();
+        let thread_id = thread_id.clone();
+        let event_id = event_id.clone();
+        let target_room_id = target_room_id.clone();
+        let target_room_link_join = target_room_link_join.clone();
+        async move {
+            select! {
+                _ = cancel_token.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(5)) => (),
+            }
+            // Default retry time taken from https://github.com/matrix-org/matrix-rust-sdk/blob/matrix-sdk-0.12.0/crates/matrix-sdk/src/http_client/native.rs#L50-L54
+            send_reply(
+                room,
+                thread_id,
+                event_id,
+                format!(
+                    "Inviting to <{}>. It make take 0–15 minutes…",
+                    target_room_id
+                ),
+                Some(format!(
+                    "Inviting to <a href=\"{}\">{}</a>. It make take 0–15 minutes…",
+                    html_escape::attr(&target_room_link_join.read().await),
+                    html_escape::text(target_room_id.as_str())
+                )),
             )
-        })
+            .await;
+        }
+        .in_current_span()
+    });
+
+    tokio::spawn(
+        async move {
+            info!("Checking the membership of {} in {}.", sender, target_room_id);
+            if let Err(err) = room.sync_members().await {
+                warn!("Failed to sync members of {}: {:?}", room.room_id(), err);
+            }
+
+            let invite_failure_is_normal = match room.get_member(&sender).await {
+                Ok(Some(member)) => {
+                    let membership = member.membership();
+                    info!(
+                        "The membership of {} in room {} is {}.",
+                        sender,
+                        target_room_id,
+                        membership.as_str()
+                    );
+                    // If the sender is banned, react as if they are joined. Their client will say they are banned.
+                    matches!(
+                        membership,
+                        MembershipState::Ban | MembershipState::Invite | MembershipState::Join
+                    )
+                }
+                Ok(None) => {
+                    info!("User {} is not in room {}.", sender, target_room_id);
+                    false
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to check if {} is already in room {}: {:?}",
+                        sender, target_room_id, err
+                    );
+                    false
+                }
+            };
+
+            let target_room_route = target_room.route().await.unwrap_or_default();
+            *target_room_link_log.write().await = target_room_id
+                .matrix_uri_via(target_room_route.clone(), false)
+                .to_string();
+            *target_room_link_join.write().await = target_room_id.matrix_uri_via(target_room_route, true).to_string();
+
+            info!("Inviting {} to room {}.", sender, target_room_id);
+            send_log(
+                &config,
+                client.clone(),
+                format!("Inviting <{}> to room <{}>…", sender, target_room_id),
+                Some(format!(
+                    "Inviting <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>…",
+                    html_escape::attr(&sender_link),
+                    html_escape::text(sender.as_str()),
+                    html_escape::attr(&target_room_link_log.read().await),
+                    html_escape::text(target_room_id.as_str())
+                )),
+            ).await;
+
+            let invite_is_successful = match target_room.invite_user_by_id(&sender).await {
+                Ok(_) => {
+                    info!("Invited {} to room {}.", sender, target_room.room_id());
+                    tokio::spawn(send_log(
+                        &config,
+                        client.clone(),
+                        format!("Invited <{}> to room <{}>.", sender, target_room_id),
+                        Some(format!(
+                            "Invited <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>.",
+                            html_escape::attr(&sender_link),
+                            html_escape::text(sender.as_str()),
+                            html_escape::attr(&target_room_link_log.read().await),
+                            html_escape::text(target_room_id.as_str())
+                        )),
+                    ));
+                    true
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to invite {} to room {}: {:?}",
+                        sender,
+                        target_room.room_id(),
+                        err
+                    );
+                    let err_str = err.to_string();
+                    tokio::spawn(send_log(
+                        &config,
+                        client.clone(),
+                        format!(
+                            "Failed to invite <{}> to room <{}>: {}",
+                            sender, target_room_id, err_str
+                        ),
+                        Some(format!(
+                            "Failed to invite <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>: {}",
+                            html_escape::attr(&sender_link),
+                            html_escape::text(sender.as_str()),
+                            html_escape::attr(&target_room_link_log.read().await),
+                            html_escape::text(target_room_id.as_str()),
+                            html_escape::text(&err_str)
+                        )),
+                    ));
+                    false
+                }
+            };
+
+            cancel_token.cancel();
+            _ = delay_notification.await;
+
+            if invite_is_successful || invite_failure_is_normal {
+                send_reply(
+                    room.clone(),
+                    thread_id,
+                    event_id,
+                    format!("Welcome to <{}>!", target_room_id),
+                    Some(format!(
+                        "Welcome to <a href=\"{}\">{}</a>!",
+                        html_escape::attr(target_room_id.as_str()),
+                        html_escape::text(&target_room_link_join.read().await)
+                    )),
+                )
+                .await;
+            } else {
+                send_reply(
+                    room.clone(),
+                    thread_id,
+                    event_id,
+                    format!(
+                        "I’ve tried to invite you to <{}>, but something went wrong.",
+                        target_room_id
+                    ),
+                    Some(format!(
+                        "I’ve tried to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
+                        html_escape::attr(target_room_id.as_str()),
+                        html_escape::text(&target_room_link_join.read().await)
+                    )),
+                )
+                .await;
+            }
+        }
+        .in_current_span(),
+    );
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#mroommessage
@@ -250,7 +513,7 @@ async fn on_message(
     event: OriginalSyncRoomMessageEvent,
     room: Room,
     client: Client,
-    passbook: Ctx<Passbook>,
+    config: Ctx<Arc<config::Config>>,
 ) {
     if event.sender == client.user_id().unwrap() {
         // Ignore my own message
@@ -260,7 +523,7 @@ async fn on_message(
     if !room.is_direct().await.unwrap_or(false) {
         return;
     }
-    set_read_marker(room.clone(), event.event_id.clone());
+    tokio::spawn(set_read_marker(room.clone(), event.event_id.clone()));
     if room.state() != RoomState::Joined {
         info!(
             "Ignoring room {}: Current room state is {:?}.",
@@ -276,182 +539,31 @@ async fn on_message(
         );
         return;
     }
-    let thread = match event.content.relates_to {
-        Some(Relation::Thread(ref thread)) => Some(thread),
+    let thread_id = match event.content.relates_to {
+        Some(Relation::Thread(ref thread)) => Some(thread.event_id.clone()),
         _ => None,
     };
-
-    let target_room_id = 'L1: {
-        let MessageType::Text(TextMessageEventContent { ref body, .. }) = event.content.msgtype
-        else {
-            break 'L1 None;
-        };
-        let passphrase = body.trim();
-        if passphrase.is_empty() {
-            break 'L1 None;
-        }
-        passbook.get(passphrase)
-    };
-    let Some(target_room_id) = target_room_id else {
-        tokio::spawn(send_reply(
-            room,
-            thread,
-            event.event_id,
-            "Incorrect passphrase, please try again.".to_owned(),
-            None,
-        ));
-        return;
-    };
-    let target_room = 'L2: {
-        let parsed = match RoomId::parse(&target_room_id) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                error!("Failed to parse room ID {}: {:?}", target_room_id, err);
-                break 'L2 None;
-            }
-        };
-        let Some(room) = client.get_room(&parsed) else {
-            error!("Failed to get room from ID {}.", target_room_id);
-            break 'L2 None;
-        };
-        Some(room)
-    };
-    let Some(target_room) = target_room else {
-        let link = matrix_to_permalink_with_fallback(None, target_room_id).await;
-        tokio::spawn(send_reply(
-            room,
-            thread,
-            event.event_id,
-            format!("I’m trying to invite you to <{link}>, but something went wrong."),
-            Some(format!(
-                "I’m trying to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
-                html_escape::attr(&link),
-                html_escape::text(&link)
-            )),
-        ));
-        return;
-    };
-
-    let thread = thread.cloned();
-    tokio::spawn(async move {
-        info!("Generating room link.");
-        let link =
-            matrix_to_permalink_with_fallback(Some(&target_room), target_room.room_id().as_str())
-                .await;
-        info!("Room link: {link}");
-
-        info!(
-            "Checking the membership of {} in {}.",
-            event.sender,
-            target_room.room_id()
-        );
-        if let Err(err) = room.sync_members().await {
-            warn!("Failed to sync members of {}: {:?}", room.room_id(), err);
-        }
-        let invite_failure_is_normal = match room.get_member(&event.sender).await {
-            Ok(Some(member)) => {
-                let membership = member.membership();
-                info!(
-                    "The membership of {} in chat {} is {:?}.",
-                    event.sender,
-                    target_room.room_id(),
-                    membership
-                );
-                match membership {
-                    // If the sender is banned, react as if they are joined. Their client will tell them the truth.
-                    MembershipState::Ban | MembershipState::Invite | MembershipState::Join => true,
-                    _ => false,
-                }
-            }
-            Ok(None) => {
-                info!(
-                    "User {} is not in chat {}.",
-                    event.sender,
-                    target_room.room_id()
-                );
-                false
-            }
-            Err(err) => {
-                warn!(
-                    "Failed to check if {} is already in chat {}: {:?}",
-                    event.sender,
-                    target_room.room_id(),
-                    err
-                );
-                false
-            }
-        };
-
-        info!(
-            "Inviting {} to chat {}.",
-            event.sender,
-            target_room.room_id()
-        );
-        send_reply(
-            room.clone(),
-            thread.as_ref(),
-            event.event_id.clone(),
-            format!("I’m inviting you to <{link}>, one second please…"),
-            Some(format!(
-                "I’m inviting you to <a href=\"{}\">{}</a>, one second please…",
-                html_escape::attr(&link),
-                html_escape::text(&link)
-            )),
-        )
-        .await;
-        let invite_is_successful = match target_room.invite_user_by_id(&event.sender).await {
-            Ok(_) => {
-                info!(
-                    "Invited {} to chat {}.",
-                    event.sender,
-                    target_room.room_id()
-                );
-                true
-            }
-            Err(err) => {
-                error!(
-                    "Failed to invite {} to chat {}: {:?}",
-                    event.sender,
-                    target_room.room_id(),
-                    err
-                );
-                false
-            }
-        };
-
-        if invite_is_successful || invite_failure_is_normal {
-            send_reply(
-                room.clone(),
-                thread.as_ref(),
-                event.event_id,
-                format!("Welcome to <{link}>!"),
-                Some(format!(
-                    "Welcome to <a href=\"{}\">{}</a>!",
-                    html_escape::attr(&link),
-                    html_escape::text(&link)
-                )),
-            )
-            .await;
-        } else {
-            send_reply(
-                room.clone(),
-                thread.as_ref(),
-                event.event_id,
-                format!("I’ve tried to invite you to <{link}>, but something went wrong.",),
-                Some(format!(
-                    "I’ve tried to invite you to <a href=\"{}\">{}</a>, but something went wrong.",
-                    html_escape::attr(&link),
-                    html_escape::text(&link)
-                )),
-            )
-            .await;
-        }
-    });
+    let passphrase = event.content.body().trim();
+    process_invite(
+        client,
+        room,
+        thread_id,
+        event.event_id,
+        event.sender,
+        passphrase,
+        config.0,
+    )
+    .await;
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#sticker-messages
 #[instrument(skip_all)]
-async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client) {
+async fn on_sticker(
+    event: OriginalSyncStickerEvent,
+    room: Room,
+    client: Client,
+    config: Ctx<Arc<config::Config>>,
+) {
     if event.sender == client.user_id().unwrap() {
         // Ignore my own message
         return;
@@ -460,7 +572,7 @@ async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client)
     if !room.is_direct().await.unwrap_or(false) {
         return;
     }
-    set_read_marker(room.clone(), event.event_id.clone());
+    tokio::spawn(set_read_marker(room.clone(), event.event_id.clone()));
     if room.state() != RoomState::Joined {
         info!(
             "Ignoring room {}: Current room state is {:?}.",
@@ -476,17 +588,21 @@ async fn on_sticker(event: OriginalSyncStickerEvent, room: Room, client: Client)
         );
         return;
     }
-    let thread = match event.content.relates_to {
-        Some(Relation::Thread(ref thread)) => Some(thread),
+    let thread_id = match event.content.relates_to {
+        Some(Relation::Thread(ref thread)) => Some(thread.event_id.clone()),
         _ => None,
     };
-    tokio::spawn(send_reply(
+    let passphrase = event.content.body.trim();
+    process_invite(
+        client,
         room,
-        thread,
+        thread_id,
         event.event_id,
-        "Incorrect passphrase, please try again.".to_owned(),
-        None,
-    ));
+        event.sender,
+        passphrase,
+        config.0,
+    )
+    .await;
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#mroomencrypted
@@ -522,31 +638,34 @@ async fn on_invite(event: StrippedRoomMemberEvent, room: Room, client: Client) {
         return;
     }
 
-    tokio::spawn(async move {
-        for retry in 0.. {
-            info!("Joining room {}.", room.room_id());
-            match room.join().await {
-                Ok(_) => {
-                    info!("Joined room {}.", room.room_id());
-                    return;
-                }
-                Err(err) => {
-                    // https://github.com/matrix-org/synapse/issues/4345
-                    if retry >= 16 {
-                        error!("Failed to join room {}: {:?}", room.room_id(), err);
-                        error!("Too many retries, giving up after 1 hour.");
+    tokio::spawn(
+        async move {
+            for retry in 0.. {
+                info!("Joining room {}.", room.room_id());
+                match room.join().await {
+                    Ok(_) => {
+                        info!("Joined room {}.", room.room_id());
                         return;
-                    } else {
-                        const BASE: f64 = 1.6180339887498947;
-                        let duration = BASE.powi(retry);
-                        warn!("Failed to join room {}: {:?}", room.room_id(), err);
-                        warn!("This is common, will retry in {:.1}s.", duration);
-                        tokio::time::sleep(Duration::from_secs_f64(duration)).await;
+                    }
+                    Err(err) => {
+                        // https://github.com/matrix-org/synapse/issues/4345
+                        if retry >= 16 {
+                            error!("Failed to join room {}: {:?}", room.room_id(), err);
+                            error!("Too many retries, giving up after 1 hour.");
+                            return;
+                        } else {
+                            const BASE: f64 = 1.6180339887498947;
+                            let duration = BASE.powi(retry);
+                            warn!("Failed to join room {}: {:?}", room.room_id(), err);
+                            warn!("This is common, will retry in {:.1}s.", duration);
+                            tokio::time::sleep(Duration::from_secs_f64(duration)).await;
+                        }
                     }
                 }
             }
         }
-    });
+        .in_current_span(),
+    );
 }
 
 // https://spec.matrix.org/v1.14/client-server-api/#mroommember
@@ -562,29 +681,37 @@ async fn on_leave(event: SyncRoomMemberEvent, room: Room) {
 
     match room.state() {
         RoomState::Joined => {
-            tokio::spawn(async move {
-                if let Err(err) = room.sync_members().await {
-                    warn!("Failed to sync members of {}: {:?}", room.room_id(), err);
-                }
-                // Only I remain in the room.
-                if room.joined_members_count() <= 1 {
-                    info!("Leaving room {}.", room.room_id());
-                    match room.leave().await {
-                        Ok(_) => info!("Left room {}.", room.room_id()),
-                        Err(err) => error!("Failed to leave room {}: {:?}", room.room_id(), err),
+            tokio::spawn(
+                async move {
+                    if let Err(err) = room.sync_members().await {
+                        warn!("Failed to sync members of {}: {:?}", room.room_id(), err);
+                    }
+                    // Only I remain in the room.
+                    if room.joined_members_count() <= 1 {
+                        info!("Leaving room {}.", room.room_id());
+                        match room.leave().await {
+                            Ok(_) => info!("Left room {}.", room.room_id()),
+                            Err(err) => {
+                                error!("Failed to leave room {}: {:?}", room.room_id(), err)
+                            }
+                        }
                     }
                 }
-            });
+                .in_current_span(),
+            );
         }
         RoomState::Banned | RoomState::Left => {
             // Either I successfully left the room, or someone kicked me out.
-            tokio::spawn(async move {
-                info!("Forgetting room {}.", room.room_id());
-                match room.forget().await {
-                    Ok(_) => info!("Forgot room {}.", room.room_id()),
-                    Err(err) => error!("Failed to forget room {}: {:?}", room.room_id(), err),
+            tokio::spawn(
+                async move {
+                    info!("Forgetting room {}.", room.room_id());
+                    match room.forget().await {
+                        Ok(_) => info!("Forgot room {}.", room.room_id()),
+                        Err(err) => error!("Failed to forget room {}: {:?}", room.room_id(), err),
+                    }
                 }
-            });
+                .in_current_span(),
+            );
         }
         _ => (),
     }

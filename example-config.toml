@@ -1,0 +1,5 @@
+log_room = "!AAAAAAAAAAAAAAAAAA:example.net"
+
+[passphrases]
+"Open sesame!" = "!BBBBBBBBBBBBBBBBBB:example.net"
+"My super-duper secret passphrase" = "!CCCCCCCCCCCCCCCCCC:example.net"
