@@ -17,7 +17,6 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation, TextMessageEventContent,
 };
-use matrix_sdk::ruma::events::sticker::OriginalSyncStickerEvent;
 use matrix_sdk::ruma::{OwnedEventId, OwnedUserId};
 use matrix_sdk::{Client, Room, RoomState};
 use tokio::select;
@@ -145,7 +144,6 @@ async fn run(config_path: &Path, data_dir: &Path) -> Result<()> {
         .await?;
 
     client.add_event_handler(on_message);
-    client.add_event_handler(on_sticker);
     client.add_event_handler(on_utd);
 
     // Forget rooms that we already left
@@ -563,55 +561,6 @@ async fn on_message(
         event.event_id,
         event.sender,
         passphrase.trim(),
-        config.0,
-    )
-    .await;
-}
-
-// https://spec.matrix.org/v1.14/client-server-api/#sticker-messages
-#[instrument(skip_all)]
-async fn on_sticker(
-    event: OriginalSyncStickerEvent,
-    room: Room,
-    client: Client,
-    config: Ctx<Arc<config::Config>>,
-) {
-    if event.sender == client.user_id().unwrap() {
-        // Ignore my own message
-        return;
-    }
-    debug!("room = {}, event = {:?}", room.room_id(), event);
-    if !room.is_direct().await.unwrap_or(false) {
-        return;
-    }
-    tokio::spawn(set_read_marker(room.clone(), event.event_id.clone()));
-    if room.state() != RoomState::Joined {
-        info!(
-            "Ignoring room {}: Current room state is {:?}.",
-            room.room_id(),
-            room.state()
-        );
-        return;
-    }
-    if let Some(Relation::Replacement(_)) = event.content.relates_to {
-        info!(
-            "Ignoring event {}: This event is an edit operation.",
-            event.event_id
-        );
-        return;
-    }
-    let passphrase = "";
-    let thread_id = match event.content.relates_to {
-        Some(Relation::Thread(ref thread)) => Some(thread.event_id.clone()),
-        _ => None,
-    };
-    process_invite(
-        client,
-        room,
-        thread_id,
-        event.event_id,
-        event.sender,
-        passphrase,
         config.0,
     )
     .await;
