@@ -14,8 +14,8 @@ use matrix_sdk::ruma::events::room::member::{
     MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent,
 };
 use matrix_sdk::ruma::events::room::message::{
-    OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
-    RoomMessageEventContentWithoutRelation,
+    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+    RoomMessageEventContentWithoutRelation, TextMessageEventContent,
 };
 use matrix_sdk::ruma::events::sticker::OriginalSyncStickerEvent;
 use matrix_sdk::ruma::{OwnedEventId, OwnedUserId};
@@ -545,18 +545,24 @@ async fn on_message(
         );
         return;
     }
+    let MessageType::Text(TextMessageEventContent {
+        body: ref passphrase,
+        ..
+    }) = event.content.msgtype
+    else {
+        return;
+    };
     let thread_id = match event.content.relates_to {
         Some(Relation::Thread(ref thread)) => Some(thread.event_id.clone()),
         _ => None,
     };
-    let passphrase = event.content.body().trim();
     process_invite(
         client,
         room,
         thread_id,
         event.event_id,
         event.sender,
-        passphrase,
+        passphrase.trim(),
         config.0,
     )
     .await;
@@ -594,11 +600,11 @@ async fn on_sticker(
         );
         return;
     }
+    let passphrase = "";
     let thread_id = match event.content.relates_to {
         Some(Relation::Thread(ref thread)) => Some(thread.event_id.clone()),
         _ => None,
     };
-    let passphrase = event.content.body.trim();
     process_invite(
         client,
         room,
