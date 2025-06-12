@@ -458,7 +458,7 @@ async fn process_invite(
                             err_str
                         ),
                         Some(format!(
-                            "Failed to invite <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>{}:<blockquote><pre>{}</pre></blockquote>",
+                            "Failed to invite <a href=\"{}\">{}</a> to room <a href=\"{}\">{}</a>{}: <pre>{}</pre>",
                             html_escape::attr(&sender_link),
                             html_escape::text(sender.as_str()),
                             html_escape::attr(&target_room_link.read().await),
