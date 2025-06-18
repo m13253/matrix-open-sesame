@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eyre::Result;
@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 #[derive(Clone, Deserialize)]
 pub struct Config {
+    pub data_dir: PathBuf,
+
     pub log_room: Option<OwnedRoomId>,
 
     #[serde(default)]

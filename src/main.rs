@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,11 +39,11 @@ enum Command {
     #[clap(about = "Perform initial setup of Matrix account")]
     Setup {
         #[clap(
-            long = "data",
+            long = "config",
             value_name = "PATH",
-            help = "Path to store Matrix data between sessions"
+            help = "Path to the configuration file"
         )]
-        data_dir: PathBuf,
+        config_path: PathBuf,
         #[clap(
             long,
             value_name = "DEVICE_NAME",
@@ -60,21 +60,15 @@ enum Command {
             help = "Path to the configuration file"
         )]
         config_path: PathBuf,
-        #[clap(
-            long = "data",
-            value_name = "PATH",
-            help = "Path to an existing Matrix session"
-        )]
-        data_dir: PathBuf,
     },
     #[clap(about = "Log out of the Matrix session, and delete the state database")]
     Logout {
         #[clap(
-            long = "data",
+            long = "config",
             value_name = "PATH",
-            help = "Path to an existing Matrix session"
+            help = "Path to the configuration file"
         )]
-        data_dir: PathBuf,
+        config_path: PathBuf,
     },
 }
 
@@ -108,23 +102,26 @@ async fn main() -> Result<()> {
 
     match args.command {
         Command::Setup {
-            data_dir,
-            device_name,
-        } => drop(matrixbot_ezlogin::setup_interactive(&data_dir, &device_name).await?),
-        Command::Run {
             config_path,
-            data_dir,
-        } => run(&config_path, &data_dir).await?,
-        Command::Logout { data_dir } => matrixbot_ezlogin::logout(&data_dir).await?,
+            device_name,
+        } => {
+            let config = config::Config::new(&config_path).await?;
+            drop(matrixbot_ezlogin::setup_interactive(&config.data_dir, &device_name).await?);
+        }
+        Command::Run { config_path } => {
+            let config = config::Config::new(&config_path).await?;
+            run(config).await?;
+        }
+        Command::Logout { config_path } => {
+            let config = config::Config::new(&config_path).await?;
+            matrixbot_ezlogin::logout(&config.data_dir).await?
+        }
     };
     Ok(())
 }
 
-async fn run(config_path: &Path, data_dir: &Path) -> Result<()> {
-    info!("Loading configuration file");
-    let config = config::Config::new(config_path).await?;
-
-    let (client, sync_helper) = matrixbot_ezlogin::login(data_dir).await?;
+async fn run(config: Arc<config::Config>) -> Result<()> {
+    let (client, sync_helper) = matrixbot_ezlogin::login(&config.data_dir).await?;
 
     // We don't ignore joining and leaving events happened during downtime.
     client.add_event_handler_context(config);
