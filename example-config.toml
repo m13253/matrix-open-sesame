@@ -1,4 +1,4 @@
-data_dir = "_data"
+data_dir = "./_data"
 log_room = "!AAAAAAAAAAAAAAAAAA:example.net"
 
 [passphrases]
