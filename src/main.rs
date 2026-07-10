@@ -8,7 +8,7 @@ use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::room::Receipts;
 use matrix_sdk::ruma::api::client::filter::FilterDefinition;
 use matrix_sdk::ruma::events::Mentions;
-use matrix_sdk::ruma::events::relation::{InReplyTo, Thread};
+use matrix_sdk::ruma::events::relation::{Reply, Thread};
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::member::{
     MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent,
@@ -231,9 +231,7 @@ fn send_reply(
     // We should use make_reply_to, but it embeds the original message body, which I don't want
     let relates_to = match thread_id {
         Some(thread) => Some(Relation::Thread(Thread::reply(thread, event_id.clone()))),
-        _ => Some(Relation::Reply {
-            in_reply_to: InReplyTo::new(event_id.clone()),
-        }),
+        _ => Some(Relation::Reply(Reply::with_event_id(event_id.clone()))),
     };
     let reply = match html {
         Some(html) => RoomMessageEventContentWithoutRelation::notice_html(text, html),
